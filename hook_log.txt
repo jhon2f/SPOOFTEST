@@ -1,0 +1,30 @@
+=== fb_diskhook start ===
+found system cr3: 0x1AD000
+kbase=0xFFFFF80229C00000 dirbase=0x1AD000
+ob_ref=0xFFFFF8022A2D9DE0 iocpl=0xFFFFF8022A105630 iodt=0xFFFFF8022A8FC5A8 value=0xFFFF9501DD2AB140
+object type name = Driver
+chinese.sys base=0xFFFFF802396D0000 size=0x9000
+dispatch=0xFFFFF802396D1560
+hook.bin=12 installer.bin=280
+hook cave @ 0xFFFFF80229FCFFB0
+placeholders patched
+hook written
+installer cave @ 0xFFFFF8022A1CBAE0
+stubs written
+hook readback: 48 B8 88 77 66 55 44 33 22 11 FF E0 CC CC CC CC
+hook expect : 48 B8 88 77 66 55 44 33 22 11 FF E0 00 00 00 00
+inst  readback: 48 83 EC 68 48 89 54 24 48 48 C7 44 24 40 00 00
+inst  expect : 48 83 EC 68 48 89 54 24 48 48 C7 44 24 40 00 00
+detoured, triggering
+trigger done bytes=32
+orig dispatch = 0xFFFFF8022E91A1D0
+orig bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+orig exec: NO
+
+driver name = 
+MajorFunction[0..3] = 0 0 0 0
+MajorFunction[14] = 0x0  exec=NO
+disk.sys base=0xFFFFF8022E8F0000 size=0x1D000
+orig in disk.sys: NO
+hook placeholder patched
+done.
